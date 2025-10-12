@@ -110,30 +110,42 @@ async def get_user_from_email_header(
             raise HTTPException(status_code=500, detail="Failed to create user")
 
 class CreateChatRequest(BaseModel):
-    """チャット作成リクエスト"""
+    """チャット作成リクエスト（競艇版）"""
     race_id: str
     race_date: str
     venue: str
     race_number: int
     race_name: str
-    horses: List[str]
+    
+    # 競艇版フィールド（オプション）
+    racers: Optional[List[str]] = []          # レーサー名
+    boats: Optional[List[int]] = []           # 艇番
+    posts: Optional[List[int]] = []           # 枠番
+    
+    # 競馬版互換（非推奨だがオプション）
+    horses: Optional[List[str]] = []
     jockeys: Optional[List[str]] = []
-    posts: Optional[List[int]] = []
     horse_numbers: Optional[List[int]] = []
-    # V2フィールド（2025-08-28追加）
-    sex_ages: Optional[List[str]] = []        # 性齢
-    weights: Optional[List[float]] = []       # 斤量
-    trainers: Optional[List[str]] = []        # 調教師
+    
+    # レース条件
+    sex_ages: Optional[List[str]] = []        # 性齢（競艇では使わない）
+    weights: Optional[List[float]] = []       # 体重
+    trainers: Optional[List[str]] = []        # 調教師（競艇では使わない）
     odds: Optional[List[float]] = []          # オッズ
     popularities: Optional[List[int]] = []    # 人気
-    distance: Optional[int] = None
-    course_type: Optional[str] = None
-    weather: Optional[str] = None
-    track_condition: Optional[str] = None
-    # レース結果データ（着順と払戻）
-    raceResults: Optional[Dict] = None  # {"first": 1, "second": 3, "third": 5, "payouts": {...}}
+    distance: Optional[int] = None            # 距離（競艇では使わない）
+    course_type: Optional[str] = None         # コースタイプ
+    weather: Optional[str] = None             # 天気
+    track_condition: Optional[str] = None     # 水面状態
+    
+    # 競艇固有フィールド
+    wind_speed: Optional[int] = None          # 風速
+    wave_height: Optional[int] = None         # 波高
+    
+    # レース結果データ
+    raceResults: Optional[Dict] = None
     imlogic_settings_id: Optional[str] = None
-    is_test_mode: Optional[bool] = False  # 管理者テストモード
+    is_test_mode: Optional[bool] = False
 
 class ChatMessageRequest(BaseModel):
     """チャットメッセージリクエスト"""
