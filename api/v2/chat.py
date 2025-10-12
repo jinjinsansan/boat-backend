@@ -324,8 +324,11 @@ async def create_chat(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
         logger.error(f"チャット作成エラー: {e}")
-        raise HTTPException(status_code=500, detail="チャットの作成に失敗しました")
+        logger.error(f"エラー詳細:\n{error_details}")
+        raise HTTPException(status_code=500, detail=f"チャットの作成に失敗しました: {str(e)}")
 
 @router.get("/sessions")
 async def get_chat_sessions(
