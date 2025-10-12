@@ -10,10 +10,10 @@ logging.basicConfig(
 )
 
 # V2 API imports
-from v2.health import router as v2_health_router
-from v2.points import router as v2_points_router
-from v2.chat import router as v2_chat_router
-from v2.line import router as v2_line_router
+from api.v2.health import router as v2_health_router
+from api.v2.points import router as v2_points_router
+from api.v2.chat import router as v2_chat_router
+from api.v2.line import router as v2_line_router
 
 app = FastAPI(title="D-Logic Boat API", version="2.0.0")
 
