@@ -11,8 +11,9 @@ from datetime import datetime, date
 from html import unescape
 from decimal import Decimal
 from services.cache_service import cache_service
-from services.imlogic_engine import IMLogicEngine
-from services.dlogic_raw_data_manager import DLogicRawDataManager
+# 競艇版では競馬固有のエンジンを無効化（メモリ節約）
+# from services.imlogic_engine import IMLogicEngine
+# from services.dlogic_raw_data_manager import DLogicRawDataManager
 try:
     from anthropic import Anthropic
 except ImportError:
@@ -31,49 +32,23 @@ class V2AIHandler:
     COLUMN_SELECTION_PREFIX = "__COLUMN_SELECT__:"
     
     def __init__(self):
-        # IMLogicEngineは毎回新規作成するため、ここでは初期化しない
-        # /logic-chatと同じ動作を保証
-        # DLogicRawDataManagerは血統分析で使用するため初期化
-        from services.dlogic_raw_data_manager import DLogicRawDataManager
-        from services.local_dlogic_raw_data_manager_v2 import local_dlogic_manager_v2
-        self.dlogic_manager = DLogicRawDataManager()  # JRA用血統分析
-        self.local_dlogic_manager = local_dlogic_manager_v2  # 地方競馬用血統分析
-
-        # SirePerformanceAnalyzerをシングルトンで初期化（高速化）
-        from services.sire_performance_analyzer import get_sire_performance_analyzer
-        from services.local_sire_performance_analyzer import get_local_sire_performance_analyzer
-        self.sire_analyzer = get_sire_performance_analyzer()  # JRA用
-        self.local_sire_analyzer = get_local_sire_performance_analyzer()  # 地方競馬用
-        logger.info("✅ SirePerformanceAnalyzer初期化完了（JRA + 地方競馬）")
+        # 競艇版では競馬固有のエンジンを無効化（メモリ節約）
+        logger.info("⚠️ 競艇版AI Handler（競馬エンジン無効）")
         
-        # N-Logicエンジン初期化
-        self.nlogic_engine = None
-        self.local_nlogic_engine = None
-        try:
-            from services.nlogic_engine import NLogicEngine
-            self.nlogic_engine = NLogicEngine()
-            logger.info("✅ N-Logicエンジン初期化完了")
-        except Exception as e:
-            logger.warning(f"⚠️ N-Logicエンジン初期化失敗（利用不可）: {e}")
-
-        try:
-            from services.local_nlogic_engine import LocalNLogicEngine
-            self.local_nlogic_engine = LocalNLogicEngine()
-            logger.info("✅ 地方版N-Logicエンジン初期化完了")
-        except Exception as e:
-            logger.warning("⚠️ 地方版N-Logicエンジン初期化失敗（利用不可）: %s", e)
+        # 競馬固有のエンジンをすべて無効化
+        # self.dlogic_manager = None
+        # self.local_dlogic_manager = None
+        # self.sire_analyzer = None
+        # self.local_sire_analyzer = None
+        # self.nlogic_engine = None
+        # self.local_nlogic_engine = None
 
         # Anthropic APIクライアント（V2では使用しないためコメントアウト）
         # self.anthropic_client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY")) if Anthropic else None
         self.anthropic_client = None  # V2チャットでは使用しない
         
-        # 地方競馬場リスト（N-Logic地方版がカバーする競馬場）
-        base_local_venues = ['川崎', '大井', '船橋', '浦和']
-        if self.local_nlogic_engine:
-            base_local_venues = sorted(
-                set(base_local_venues) | set(self.local_nlogic_engine.LOCAL_VENUE_CODE_MAP.keys())
-            )
-        self.LOCAL_VENUES = base_local_venues
+        # 競艇場リスト（将来的に実装）
+        self.LOCAL_VENUES = []  # 競艇版では空リスト
         
         # AI選択キーワード
         self.AI_KEYWORDS = {

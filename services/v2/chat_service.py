@@ -26,16 +26,16 @@ class V2ChatService:
             
         self.supabase: Client = create_client(supabase_url, supabase_key)
         
-        # IMLogicEngineは遅延初期化（メモリ節約のため）
-        self._imlogic_engine = None
+        # 競艇版では競馬エンジンを無効化
+        # self._imlogic_engine = None
     
-    @property
-    def imlogic_engine(self):
-        """IMLogicEngineの遅延初期化"""
-        if self._imlogic_engine is None:
-            from services.imlogic_engine import IMLogicEngine
-            self._imlogic_engine = IMLogicEngine()
-        return self._imlogic_engine
+    # @property
+    # def imlogic_engine(self):
+    #     """IMLogicEngineの遅延初期化"""
+    #     if self._imlogic_engine is None:
+    #         from services.imlogic_engine import IMLogicEngine
+    #         self._imlogic_engine = IMLogicEngine()
+    #     return self._imlogic_engine
     
     async def create_session(
         self,
