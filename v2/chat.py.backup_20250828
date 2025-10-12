@@ -1,0 +1,396 @@
+"""
+V2チャット管理API
+IMLogicとViewLogic（将来）を統合
+"""
+from fastapi import APIRouter, HTTPException, Depends, Header
+from typing import Dict, List, Optional
+from datetime import datetime
+import logging
+from pydantic import BaseModel
+import uuid
+import os
+import json
+from supabase import create_client, Client
+
+from api.v2.auth import get_current_user, verify_email_token
+from api.v2.config import v2_config
+from services.v2.points_service import V2PointsService
+from services.v2.chat_service import V2ChatService
+from services.v2.ai_handler import V2AIHandler
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/v2/chat", tags=["v2-chat"])
+
+async def get_user_from_email_header(
+    x_user_email: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None)
+) -> dict:
+    """X-User-EmailヘッダーまたはAuthorizationヘッダーから簡易的にユーザー情報を取得"""
+    # X-User-Emailヘッダーがあればそれを使用
+    email = x_user_email
+    
+    # なければAuthorizationヘッダーから取得
+    if not email and authorization:
+        # "Bearer email@example.com" 形式から email を抽出
+        if authorization.startswith("Bearer "):
+            email = authorization[7:]  # "Bearer " の7文字をスキップ
+    
+    if not email:
+        raise HTTPException(status_code=403, detail="Not authenticated")
+    
+    # verify_email_tokenと同じようにユーザー情報を取得
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+    
+    if not supabase_url or not supabase_key:
+        logger.error(f"Supabase設定エラー: URL={bool(supabase_url)}, KEY={bool(supabase_key)}")
+        raise HTTPException(status_code=500, detail="サーバー設定エラー")
+    
+    try:
+        supabase: Client = create_client(supabase_url, supabase_key)
+        
+        # V2専用テーブルでユーザーを検索
+        user_result = supabase.table("v2_users").select("*").eq("email", email).execute()
+    except Exception as e:
+        logger.error(f"Supabase接続エラー: {e}")
+        raise HTTPException(status_code=500, detail=f"データベース接続エラー: {str(e)}")
+    
+    if user_result.data:
+        user = user_result.data[0]
+        return {
+            "user_id": user["id"],
+            "email": user["email"],
+            "name": user.get("name", "")
+        }
+    else:
+        # ユーザーが見つからない場合は作成
+        try:
+            create_result = supabase.table("v2_users").insert({
+                "email": email,
+                "name": email.split("@")[0],
+                "google_id": f"v2-{email}",
+                "avatar_url": ""
+            }).execute()
+        except Exception as e:
+            logger.error(f"V2ユーザー作成エラー: {e}")
+            raise HTTPException(status_code=500, detail=f"ユーザー作成エラー: {str(e)}")
+        
+        if create_result.data:
+            user = create_result.data[0]
+            
+            # 初期ポイント付与
+            try:
+                initial_points = v2_config.POINTS_GOOGLE_AUTH
+                
+                supabase.table("v2_user_points").insert({
+                    "user_id": user["id"],
+                    "current_points": initial_points,
+                    "total_earned": initial_points,
+                    "total_spent": 0
+                }).execute()
+                
+                supabase.table("v2_point_transactions").insert({
+                    "user_id": user["id"],
+                    "amount": initial_points,
+                    "transaction_type": "initial_grant",
+                    "description": f"初期ポイント付与（{initial_points}ポイント）",
+                    "balance_after": initial_points
+                }).execute()
+                
+            except Exception as e:
+                logger.warning(f"Failed to grant initial points: {e}")
+            
+            return {
+                "user_id": user["id"],
+                "email": user["email"],
+                "name": user.get("name", "")
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+
+class CreateChatRequest(BaseModel):
+    """チャット作成リクエスト"""
+    race_id: str
+    race_date: str
+    venue: str
+    race_number: int
+    race_name: str
+    horses: List[str]
+    jockeys: Optional[List[str]] = []
+    posts: Optional[List[int]] = []
+    horse_numbers: Optional[List[int]] = []
+    distance: Optional[int] = None
+    course_type: Optional[str] = None
+    weather: Optional[str] = None
+    track_condition: Optional[str] = None
+    imlogic_settings_id: Optional[str] = None
+    is_test_mode: Optional[bool] = False  # 管理者テストモード
+
+class ChatMessageRequest(BaseModel):
+    """チャットメッセージリクエスト"""
+    message: str
+    ai_type: str  # 'imlogic' or 'viewlogic'
+    imlogic_settings: Optional[Dict] = None  # IMLogic設定（オプション）
+
+@router.post("/create")
+async def create_chat(
+    request: CreateChatRequest,
+    user_info: dict = Depends(verify_email_token)
+):
+    """
+    新しいチャットセッションを作成（1ポイント消費）
+    管理者テストモードの場合はポイント消費なし
+    """
+    try:
+        user_id = user_info["user_id"]
+        user_email = user_info.get("email", "")
+        
+        # 管理者チェック（テストモードの場合はポイントチェックをスキップ）
+        is_admin_test = request.is_test_mode and (user_email == "goldbenchan@gmail.com" or user_email == "kusanokiyoshi1@gmail.com")
+        
+        # ポイント確認（管理者テストモード以外）
+        if not is_admin_test:
+            points_service = V2PointsService()
+            points_data = await points_service.get_user_points(user_id)
+            
+            if points_data["current_points"] < 1:
+                raise HTTPException(status_code=400, detail="チャット作成にはポイントが必要です")
+        
+        # チャット作成
+        chat_service = V2ChatService()
+        chat_session = await chat_service.create_session(
+            user_id=user_id,
+            race_data={
+                "race_id": request.race_id,
+                "race_date": request.race_date,
+                "venue": request.venue,
+                "race_number": request.race_number,
+                "race_name": request.race_name,
+                "horses": request.horses,
+                "jockeys": request.jockeys,
+                "posts": request.posts,
+                "horse_numbers": request.horse_numbers,
+                "distance": request.distance,
+                "course_type": request.course_type,
+                "weather": request.weather,
+                "track_condition": request.track_condition
+            },
+            imlogic_settings_id=request.imlogic_settings_id
+        )
+        
+        # ポイント消費（管理者テストモード以外）
+        if not is_admin_test:
+            await points_service.use_points(
+                user_id=user_id,
+                amount=1,
+                transaction_type="chat_create",
+                description=f"{request.venue}{request.race_number}Rのチャット作成",
+                related_entity_id=chat_session["id"]
+            )
+            remaining_points = points_data["current_points"] - 1
+        else:
+            # 管理者テストモードの場合はポイント変更なし
+            points_service = V2PointsService()
+            points_data = await points_service.get_user_points(user_id)
+            remaining_points = points_data["current_points"]
+        
+        return {
+            "success": True,
+            "chat_id": chat_session["id"],
+            "remaining_points": remaining_points,
+            "test_mode": is_admin_test
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"チャット作成エラー: {e}")
+        raise HTTPException(status_code=500, detail="チャットの作成に失敗しました")
+
+@router.get("/sessions")
+async def get_chat_sessions(
+    limit: int = 20,
+    offset: int = 0,
+    user_info: dict = Depends(verify_email_token)
+):
+    """
+    ユーザーのチャットセッション一覧を取得
+    """
+    try:
+        user_id = user_info["user_id"]
+        logger.info(f"Getting sessions for user: {user_info.get('email', 'unknown')}, user_id: {user_id}")
+        
+        chat_service = V2ChatService()
+        sessions = await chat_service.get_user_sessions(
+            user_id=user_id,
+            limit=limit,
+            offset=offset
+        )
+        
+        logger.info(f"Returning {len(sessions)} sessions")
+        
+        return {
+            "sessions": sessions,
+            "limit": limit,
+            "offset": offset,
+            "total": len(sessions)
+        }
+        
+    except Exception as e:
+        logger.error(f"セッション一覧取得エラー: {e}")
+        logger.error(f"Error details: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="セッション一覧の取得に失敗しました")
+
+@router.get("/session/{session_id}")
+async def get_chat_session(
+    session_id: str,
+    user_info: dict = Depends(verify_email_token)
+):
+    """
+    特定のチャットセッションを取得
+    """
+    try:
+        user_id = user_info["user_id"]
+        chat_service = V2ChatService()
+        session = await chat_service.get_session(session_id, user_id)
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="チャットセッションが見つかりません")
+        
+        # 最終アクセス日時を更新
+        await chat_service.update_last_accessed(session_id)
+        
+        return session
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"セッション取得エラー: {e}")
+        raise HTTPException(status_code=500, detail="セッションの取得に失敗しました")
+
+@router.post("/session/{session_id}/message")
+async def send_message(
+    session_id: str,
+    request: ChatMessageRequest,
+    user_info: dict = Depends(get_user_from_email_header)
+):
+    """
+    チャットにメッセージを送信
+    """
+    try:
+        # レート制限チェック
+        from api.v2.rate_limiter import check_rate_limit
+        user_id = user_info["user_id"]
+        is_allowed, retry_after = check_rate_limit(user_id, 'chat_message')
+        
+        if not is_allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=f"リクエスト制限を超えました。{retry_after}秒後に再試行してください。",
+                headers={"Retry-After": str(retry_after)}
+            )
+        logger.info(f"=== send_message開始 ===")
+        logger.info(f"session_id: {session_id}")
+        logger.info(f"user_info: {user_info}")
+        logger.info(f"request: {request}")
+        
+        user_id = user_info["user_id"]
+        chat_service = V2ChatService()
+        
+        # セッション確認
+        session = await chat_service.get_session(session_id, user_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="チャットセッションが見つかりません")
+        
+        # AIタイプ確認
+        if request.ai_type not in ["imlogic", "viewlogic"]:
+            raise HTTPException(status_code=400, detail="無効なAIタイプです")
+        
+        # V2 AIハンドラーで処理（グローバルインスタンスを使用してメモリ節約）
+        logger.info(f"AIハンドラー取得開始")
+        from services.v2.ai_handler_singleton import get_ai_handler
+        ai_handler = get_ai_handler()
+        logger.info(f"AIハンドラー取得完了")
+        
+        # レースデータを構築
+        # race_snapshotからデータを優先的に取得
+        race_snapshot = session.get("race_snapshot", {})
+        if isinstance(race_snapshot, str):
+            try:
+                race_snapshot = json.loads(race_snapshot)
+            except:
+                race_snapshot = {}
+        
+        # デバッグ: セッションデータの構造を確認
+        logger.info(f"=== セッションデータ確認 ===")
+        logger.info(f"session keys: {session.keys()}")
+        logger.info(f"race_snapshot type: {type(race_snapshot)}")
+        if isinstance(race_snapshot, dict):
+            logger.info(f"race_snapshot horses: {race_snapshot.get('horses', [])}")
+            logger.info(f"race_snapshot jockeys: {race_snapshot.get('jockeys', [])}")
+        
+        race_data = {
+            "race_id": session.get("race_id"),
+            "race_date": session.get("race_date"),
+            "venue": session.get("venue"),
+            "race_number": session.get("race_number"),
+            "race_name": session.get("race_name"),
+            "horses": race_snapshot.get("horses") or session.get("horses", []),
+            "jockeys": race_snapshot.get("jockeys") or session.get("jockeys"),
+            "posts": race_snapshot.get("posts") or session.get("posts"),
+            "horse_numbers": race_snapshot.get("horse_numbers") or session.get("horse_numbers"),
+            "distance": race_snapshot.get("distance") or session.get("distance"),
+            "track_condition": race_snapshot.get("track_condition") or session.get("track_condition")
+        }
+        
+        logger.info(f"=== 最終的なrace_data ===")
+        logger.info(f"horses: {race_data.get('horses', [])}")
+        
+        # IMLogic設定を取得（リクエストから渡されるか、セッションから取得）
+        imlogic_settings = request.imlogic_settings
+        if not imlogic_settings and request.ai_type == "imlogic" and session.get("imlogic_settings_id"):
+            # TODO: Supabaseから設定を取得
+            pass
+        
+        # AIハンドラーで処理
+        logger.info(f"process_message開始")
+        logger.info(f"race_data: {race_data}")
+        logger.info(f"imlogic_settings: {imlogic_settings}")
+        
+        ai_response = await ai_handler.process_message(
+            message=request.message,
+            race_data=race_data,
+            ai_type=request.ai_type,
+            settings=imlogic_settings
+        )
+        
+        logger.info(f"process_message完了: {ai_response}")
+        
+        # チャットサービスに保存
+        response = await chat_service.save_message(
+            session_id=session_id,
+            role="user",
+            content=request.message,
+            ai_type=request.ai_type
+        )
+        
+        assistant_response = await chat_service.save_message(
+            session_id=session_id,
+            role="assistant",
+            content=ai_response.get("content", ""),  # 辞書からcontentを取得
+            ai_type=ai_response.get("ai_type", request.ai_type),
+            analysis_data=ai_response.get("analysis_data")
+        )
+        
+        # アシスタントの応答を返す
+        return {"message": assistant_response}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"エラー: {str(e)}\n\nトレース: {traceback.format_exc()}"
+        logger.error(f"メッセージ送信エラー: {error_detail}")
+        raise HTTPException(status_code=500, detail=f"メッセージの送信に失敗しました: {str(e)}")
