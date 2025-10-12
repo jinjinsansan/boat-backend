@@ -1,5 +1,5 @@
 """
-V2システムヘルスチェックAPI
+V2システムヘルスチェックAPI（競艇版）
 """
 from fastapi import APIRouter, HTTPException
 from typing import Dict
@@ -17,14 +17,14 @@ async def health_check() -> Dict:
     health_status = {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "2.0",
+        "version": "2.0-boat",
         "services": {}
     }
     
     # Supabase接続チェック
     try:
         supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
         
         if supabase_url and supabase_key:
             supabase = create_client(supabase_url, supabase_key)
@@ -45,17 +45,17 @@ async def health_check() -> Dict:
             "error": str(e)
         }
     
-    # IMLogicエンジンチェック
+    # 競艇レーサーデータチェック
     try:
-        from services.imlogic_engine import get_imlogic_engine
-        engine = get_imlogic_engine()
-        health_status["services"]["imlogic"] = {
-            "status": "ready",
-            "jockey_data_loaded": hasattr(engine, 'jockey_manager'),
-            "dlogic_data_loaded": hasattr(engine, 'dlogic_manager')
+        from services.racer_data_manager import get_racer_manager
+        manager = get_racer_manager()
+        stats = manager.get_knowledge_stats()
+        health_status["services"]["racer_data"] = {
+            "status": "ready" if stats["loaded"] else "not_loaded",
+            **stats
         }
     except Exception as e:
-        health_status["services"]["imlogic"] = {
+        health_status["services"]["racer_data"] = {
             "status": "error",
             "error": str(e)
         }
@@ -77,13 +77,13 @@ async def readiness_check() -> Dict:
     health = await health_check()
     
     if health["status"] == "healthy":
-        return {"ready": True, "message": "V2システムは準備完了です"}
+        return {"ready": True, "message": "競艇版V2システムは準備完了です"}
     else:
         raise HTTPException(
             status_code=503,
             detail={
                 "ready": False,
-                "message": "V2システムは準備中です",
+                "message": "競艇版V2システムは準備中です",
                 "services": health["services"]
             }
         )
@@ -94,8 +94,7 @@ async def system_stats() -> Dict:
     stats = {
         "timestamp": datetime.now().isoformat(),
         "rate_limiter": {},
-        "cache": {},
-        "cleanup": {}
+        "cache": {}
     }
     
     # レート制限統計
@@ -114,12 +113,5 @@ async def system_stats() -> Dict:
         stats["cache"] = cache_manager.get_stats()
     except Exception as e:
         stats["cache"]["error"] = str(e)
-    
-    # クリーンアップ統計（Supabase経由）
-    try:
-        from api.v2.cleanup_settings import get_cleanup_stats
-        stats["cleanup"] = await get_cleanup_stats()
-    except Exception as e:
-        stats["cleanup"]["error"] = str(e)
     
     return stats
