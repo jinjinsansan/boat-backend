@@ -13,6 +13,7 @@ logging.basicConfig(
 from api.v2.health import router as v2_health_router
 from api.v2.points import router as v2_points_router
 from api.v2.chat import router as v2_chat_router
+from api.v2.column import router as v2_column_router
 from api.v2.line import router as v2_line_router
 
 app = FastAPI(title="D-Logic Boat API", version="2.0.0")
@@ -40,6 +41,7 @@ app.add_middleware(
 app.include_router(v2_health_router)
 app.include_router(v2_points_router)
 app.include_router(v2_chat_router)
+app.include_router(v2_column_router)
 app.include_router(v2_line_router)
 
 @app.get("/")
