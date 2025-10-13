@@ -49,7 +49,7 @@ CREATE INDEX IF NOT EXISTS idx_expert_room_members_joined_at ON expert_room_memb
 -- =====================================================
 CREATE TABLE IF NOT EXISTS chat_messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    room_id UUID REFERENCES expert_rooms(id) ON DELETE CASCADE NULLABLE,
+    room_id UUID REFERENCES expert_rooms(id) ON DELETE CASCADE,
     user_email VARCHAR(255) NOT NULL,
     display_name VARCHAR(100) NOT NULL,
     message TEXT NOT NULL,
