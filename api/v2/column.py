@@ -1,17 +1,17 @@
 """
-V2コラムポイント消費API
+V2コラムポイント消費API（競艇版）
 コラム閲覧時のポイント消費と既読管理
-作成日: 2025-09-04
+作成日: 2025-10-13
 """
 from fastapi import APIRouter, HTTPException, Depends
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from datetime import datetime
 import logging
 import os
 from supabase import create_client, Client
 
 from services.v2.points_service import V2PointsService, InsufficientPointsError
-from api.v2.auth import get_current_user
+from api.v2.auth import verify_email_token
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api/v2/column", tags=["v2-column"])
 @router.post("/view/{column_id}")
 async def view_column_with_points(
     column_id: str,
-    user_data: Dict = Depends(get_current_user)
+    user_data: Dict = Depends(verify_email_token)
 ) -> Dict:
     """
     コラムを閲覧（ポイント消費処理付き）
@@ -39,7 +39,7 @@ async def view_column_with_points(
     6. コラム内容を返却
     """
     try:
-        user_id = user_data.get("id")
+        user_id = user_data.get("user_id")
         user_email = user_data.get("email")
         
         if not user_id:
@@ -76,7 +76,6 @@ async def view_column_with_points(
         # 管理者は無料で閲覧可能
         if is_admin:
             logger.info(f"管理者アクセス: ポイント消費をスキップ")
-            # 閲覧記録のみ保存
             await _record_column_view(column_id, user_id)
             return {
                 "success": True,
@@ -110,7 +109,7 @@ async def view_column_with_points(
             points_service = V2PointsService()
             
             try:
-                # ポイント消費（楽観的ロック付き）
+                # ポイント消費
                 transaction = await points_service.use_points(
                     user_id=user_id,
                     amount=required_points,
@@ -123,7 +122,8 @@ async def view_column_with_points(
                 read_record = {
                     "column_id": column_id,
                     "user_id": user_id,
-                    "read_at": datetime.now().isoformat()
+                    "read_at": datetime.now().isoformat(),
+                    "points_used": required_points
                 }
                 supabase.table("v2_column_reads").insert(read_record).execute()
                 
@@ -172,7 +172,6 @@ async def view_column_with_points(
                     "message": "このコラムを閲覧するにはLINE連携が必要です"
                 }
             
-            # 閲覧記録を保存
             await _record_column_view(column_id, user_id)
             
             return {
@@ -183,7 +182,6 @@ async def view_column_with_points(
         
         # 5. 無料コラムの場合
         else:
-            # 閲覧記録を保存
             await _record_column_view(column_id, user_id)
             
             return {
@@ -196,7 +194,9 @@ async def view_column_with_points(
         raise
     except Exception as e:
         logger.error(f"コラム閲覧エラー: {e}")
-        raise HTTPException(status_code=500, detail="コラムの閲覧に失敗しました")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"コラムの閲覧に失敗しました: {str(e)}")
 
 async def _record_column_view(column_id: str, user_id: str) -> None:
     """コラム閲覧記録を保存"""
@@ -208,23 +208,22 @@ async def _record_column_view(column_id: str, user_id: str) -> None:
         }
         supabase.table("v2_column_views").insert(view_record).execute()
         
-        # ビュー数を更新（非同期でも問題なし）
+        # ビュー数を更新
         supabase.rpc("increment_column_view_count", {"p_column_id": column_id}).execute()
         
     except Exception as e:
-        # ビュー記録の失敗はエラーにしない（メイン処理には影響しない）
         logger.warning(f"ビュー記録失敗（非致命的）: {e}")
 
 @router.get("/read-status/{column_id}")
 async def get_column_read_status(
     column_id: str,
-    user_data: Dict = Depends(get_current_user)
+    user_data: Dict = Depends(verify_email_token)
 ) -> Dict:
     """
     コラムの既読状態を確認
     """
     try:
-        user_id = user_data.get("id")
+        user_id = user_data.get("user_id")
         
         if not user_id:
             raise HTTPException(status_code=401, detail="ユーザー認証が必要です")
@@ -239,12 +238,14 @@ async def get_column_read_status(
         if read_response.data:
             return {
                 "is_read": True,
-                "read_at": read_response.data[0].get("read_at")
+                "read_at": read_response.data[0].get("read_at"),
+                "points_used": read_response.data[0].get("points_used", 0)
             }
         else:
             return {
                 "is_read": False,
-                "read_at": None
+                "read_at": None,
+                "points_used": 0
             }
             
     except Exception as e:
@@ -260,7 +261,7 @@ async def get_column_preview(column_id: str) -> Dict:
     try:
         # コラム基本情報のみ取得（content以外）
         column_response = supabase.table("v2_columns")\
-            .select("id, title, summary, featured_image, category_id, access_type, required_points, published_at, is_published")\
+            .select("id, title, summary, featured_image, category_id, access_type, required_points, published_at, is_published, view_count")\
             .eq("id", column_id)\
             .execute()
         
@@ -283,3 +284,56 @@ async def get_column_preview(column_id: str) -> Dict:
     except Exception as e:
         logger.error(f"コラムプレビュー取得エラー: {e}")
         raise HTTPException(status_code=500, detail="プレビューの取得に失敗しました")
+
+@router.get("/list")
+async def get_column_list(
+    category_id: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0
+) -> Dict:
+    """
+    コラム一覧を取得（公開済みのみ）
+    """
+    try:
+        query = supabase.table("v2_columns")\
+            .select("id, title, summary, featured_image, category_id, access_type, required_points, published_at, view_count, display_order")\
+            .eq("is_published", True)\
+            .order("display_order", desc=False)\
+            .order("published_at", desc=True)\
+            .range(offset, offset + limit - 1)
+        
+        if category_id:
+            query = query.eq("category_id", category_id)
+        
+        response = query.execute()
+        
+        return {
+            "success": True,
+            "columns": response.data or [],
+            "limit": limit,
+            "offset": offset
+        }
+        
+    except Exception as e:
+        logger.error(f"コラム一覧取得エラー: {e}")
+        raise HTTPException(status_code=500, detail="コラム一覧の取得に失敗しました")
+
+@router.get("/categories")
+async def get_categories() -> Dict:
+    """
+    コラムカテゴリ一覧を取得
+    """
+    try:
+        response = supabase.table("column_categories")\
+            .select("*")\
+            .order("display_order")\
+            .execute()
+        
+        return {
+            "success": True,
+            "categories": response.data or []
+        }
+        
+    except Exception as e:
+        logger.error(f"カテゴリ一覧取得エラー: {e}")
+        raise HTTPException(status_code=500, detail="カテゴリ一覧の取得に失敗しました")
